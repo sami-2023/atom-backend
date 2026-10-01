@@ -1,5 +1,6 @@
 import os
 import uuid
+import gc
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -7,7 +8,6 @@ from groq import Groq
 from tavily import TavilyClient
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
 
 # Load API keys securely from .env file
 load_dotenv()
@@ -49,11 +49,21 @@ except Exception as err:
     ACTIVE_LLM_MODEL = "llama-3.3-70b-versatile"
 
 # ---------------------------------------------------------
-# VECTOR MEMORY (Qdrant + Local Embeddings)
+# LAZY-LOADED EMBEDDINGS (Prevents Render Boot OOM)
 # ---------------------------------------------------------
-print("Loading Local Embedding Model (SentenceTransformer)...")
-encoder = SentenceTransformer('all-MiniLM-L6-v2')
+encoder = None
 
+def get_encoder():
+    global encoder
+    if encoder is None:
+        print("[MEMORY] Lazy loading SentenceTransformer model...")
+        from sentence_transformers import SentenceTransformer
+        encoder = SentenceTransformer('all-MiniLM-L6-v2')
+    return encoder
+
+# ---------------------------------------------------------
+# VECTOR MEMORY (Qdrant)
+# ---------------------------------------------------------
 qdrant_client = QdrantClient(path="./atom_vector_db")
 
 if not qdrant_client.collection_exists("atom_knowledge"):
@@ -69,7 +79,6 @@ print("Atom's Memory Initialized Successfully.")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
-    # Clean shutdown of vector DB connection
     qdrant_client.close()
 
 app = FastAPI(title="Atom Brain & Ears Server", lifespan=lifespan)
@@ -111,7 +120,6 @@ async def process_audio(file: UploadFile = File(...)):
             "Corrected Transcript:"
         )
 
-        # Uses dynamically chosen ACTIVE_LLM_MODEL instead of hardcoded model name
         norm_response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": clean_prompt}],
             model=ACTIVE_LLM_MODEL,
@@ -123,7 +131,8 @@ async def process_audio(file: UploadFile = File(...)):
 
         # --- STEP 2: THE BRAIN - MEMORY SEARCH (Qdrant Vector DB) ---
         print("[BRAIN] Searching internal memory...")
-        query_vector = encoder.encode(user_speech).tolist()
+        model_encoder = get_encoder()
+        query_vector = model_encoder.encode(user_speech).tolist()
 
         query_response = qdrant_client.query_points(
             collection_name="atom_knowledge",
@@ -179,6 +188,9 @@ async def process_audio(file: UploadFile = File(...)):
 
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
+
+        # Force garbage collection to free memory on small instances
+        gc.collect()
 
         return {
             "status": "success",
