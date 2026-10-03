@@ -8,6 +8,8 @@ from groq import Groq
 from tavily import TavilyClient
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+import torch
+import torch.nn as nn
 
 # Load API keys securely from .env file
 load_dotenv()
